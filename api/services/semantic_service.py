@@ -268,13 +268,26 @@ class SemanticService:
                 g.get("name", "") for g in (query_params.get("group_by") or [])
             ]
 
+            # Fetch MetricFlow-compiled SQL for explainability
+            compiled_sql = ""
+            try:
+                compiled_sql = self._dbt_mcp.get_compiled_sql(
+                    metrics=query_params["metrics"],
+                    group_by=query_params.get("group_by"),
+                    order_by=query_params.get("order_by"),
+                    where=query_params.get("where"),
+                    limit=query_params.get("limit"),
+                )
+            except Exception as sql_exc:
+                logger.warning(f"compiled_sql_fetch_failed: {sql_exc}")
+
             metric_result = MetricResult(
                 columns=columns,
                 rows=rows,
                 row_count=len(rows),
                 metrics_used=query_params["metrics"],
                 dimensions_used=dimensions_used,
-                compiled_sql=None,
+                compiled_sql=compiled_sql or None,
             )
 
         except Exception as exc:
@@ -299,9 +312,13 @@ class SemanticService:
             error=error_str,
         )
 
+        metricflow_sql = ""
+        if metric_result and metric_result.compiled_sql:
+            metricflow_sql = metric_result.compiled_sql
+
         explain_resp = self._explain.build_explain_response(
             trace_id=trace_id,
-            candidate_sql="(metric query via dbt Semantic Layer)",
+            candidate_sql=metricflow_sql or "(metric query via dbt Semantic Layer)",
             candidate_count=metric_result.row_count if metric_result else 0,
             top_candidates_pre_rerank=[],
             rerank_result=RerankResult(ranked_ids=[], rationale={}, prompt_used=""),

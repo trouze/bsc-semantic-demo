@@ -36,10 +36,22 @@ if "trace_history" not in st.session_state:
     st.session_state.trace_history = []
 
 # ── Header ─────────────────────────────────────────────────────────────────
-st.title("📦 Order Status Assistant")
 st.markdown(
-    "_Boston Scientific · Medical Device Fulfillment · "
-    "Powered by Snowflake + Cortex + dbt Semantic Layer_"
+    """
+    <div style="display:flex; align-items:flex-start; gap:18px;">
+        <div style="flex:1; min-width:0;">
+            <h1 style="margin:0; padding:0; line-height:1.2;">
+                &#x1F4E6; Order Status Assistant
+            </h1>
+            <p style="margin:4px 0 0 0; color:#888; font-style:italic; font-size:0.95rem;">
+                Medical Device Fulfillment · Powered by Snowflake + Cortex + dbt Semantic Layer
+            </p>
+        </div>
+        <img src="https://upload.wikimedia.org/wikipedia/commons/0/02/Boston_Scientific_Logo.svg"
+             alt="Boston Scientific" style="height:48px; margin-top:4px;" />
+    </div>
+    """,
+    unsafe_allow_html=True,
 )
 
 # Health check badges
@@ -50,12 +62,12 @@ try:
     col_sf, col_dbt, col_backend = st.columns(3)
     with col_sf:
         if hc_data.get("snowflake", False):
-            st.success("Connected to Snowflake")
+            st.success("\u2705 Connected to Snowflake")
         else:
             st.warning("Snowflake degraded")
     with col_dbt:
         if hc_data.get("dbt_cloud", False):
-            st.success("Connected to dbt Cloud (MCP)")
+            st.success("\u2705 Connected to dbt Cloud (MCP)")
         elif hc_data.get("dbt_cloud_configured", False):
             st.warning("dbt Cloud configured but unreachable")
         else:
@@ -63,7 +75,7 @@ try:
     with col_backend:
         backend = hc_data.get("semantic_backend", "direct_sql")
         if backend == "dbt_mcp":
-            st.info("Semantic Layer: Active")
+            st.success("\u2705 Semantic Layer: Active")
         else:
             st.info("Semantic Layer: Direct SQL")
 except Exception:
@@ -139,6 +151,8 @@ with right_col:
                 if not explain_data.get("candidate_sql") and data.get("candidate_sql"):
                     explain_data["candidate_sql"] = data["candidate_sql"]
                 explain_data["candidate_count"] = data.get("candidate_count", "—")
+                explain_data["_response_type"] = "metric_query"
+                explain_data["_metric_result"] = data.get("metric_result")
                 render_explain_panel(explain_data)
 
             with perf_tab:
@@ -162,6 +176,7 @@ with right_col:
                 if not explain_data.get("fetch_sql") and data.get("fetch_sql"):
                     explain_data["fetch_sql"] = data["fetch_sql"]
                 explain_data["candidate_count"] = data.get("candidate_count", "—")
+                explain_data["_response_type"] = "order_lookup"
                 render_explain_panel(explain_data)
 
             with perf_tab:
