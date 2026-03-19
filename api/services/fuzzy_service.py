@@ -25,6 +25,7 @@ class NormalizedQuery:
     contact_tokens: List[str]
     date_start: Optional[str]    # ISO string or None
     date_end: Optional[str]
+    status: Optional[str]
     free_text_tokens: List[str]
     raw_free_text: Optional[str]
 
@@ -67,7 +68,7 @@ _STOP_WORDS = frozenset({
     "find", "show", "get", "give", "list", "display", "fetch", "pull",
     "me", "my", "the", "for", "and", "with", "from", "about", "what",
     "where", "when", "how", "any", "all", "need", "want", "can", "please",
-    "orders", "order", "shipped", "delivered", "recent", "latest", "last",
+    "orders", "order", "recent", "latest", "last",
     "look", "looking", "search", "check", "tell", "update", "info",
 })
 
@@ -97,6 +98,7 @@ class FuzzyService:
             customer_tokens=_expand_tokens(_tokenize(f.customer_name)),
             facility_tokens=_expand_tokens(_tokenize(f.facility_name)),
             contact_tokens=_tokenize(f.contact_name),
+            status=f.status.strip().lower() if f.status else None,
             date_start=str(f.date_start) if f.date_start else None,
             date_end=str(f.date_end) if f.date_end else None,
             free_text_tokens=free_text_tokens,
@@ -158,6 +160,14 @@ class FuzzyService:
         if normalized.date_end:
             where_clauses.append("order_created_ts <= %(date_end)s::DATE")
             params["date_end"] = normalized.date_end
+
+        # Status filter — exact match on normalized status value
+        if normalized.status:
+            where_clauses.append("LOWER(status) = %(status_filter)s")
+            params["status_filter"] = normalized.status
+            score_parts.append(
+                "CASE WHEN LOWER(status) = %(status_filter)s THEN 25 ELSE 0 END"
+            )
 
         # Facility token scoring — build one LIKE per token; also filter to rows
         # that match at least one facility OR customer token (if tokens provided).

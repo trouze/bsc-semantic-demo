@@ -37,6 +37,7 @@ class ParsedIntent:
     date_start: Optional[str] = None
     date_end: Optional[str] = None
     contact_name: Optional[str] = None
+    status: Optional[str] = None
     metric_question: Optional[str] = None
     metric_params: Optional[Dict[str, Any]] = None
     raw_response: str = ""
@@ -72,6 +73,7 @@ Fields to extract:
   date_start: ISO date string or null (start of date window)
   date_end: ISO date string or null (end of date window)
   contact_name: string or null
+  status: string or null (order status — e.g. "shipped", "delivered", "pending", "cancelled", "processing")
   metric_question: string or null (for metric_query intent, rephrase the question clearly)
 
 Today's date: {today}

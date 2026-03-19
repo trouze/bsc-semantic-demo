@@ -12,6 +12,7 @@ class SearchFields(BaseModel):
     date_start: Optional[date] = None
     date_end: Optional[date] = None
     contact_name: Optional[str] = None
+    status: Optional[str] = None
 
 
 class SearchRequest(BaseModel):

@@ -436,6 +436,7 @@ class SemanticService:
                     except ValueError:
                         pass
                 f.contact_name = f.contact_name or intent.contact_name
+                f.status = f.status or intent.status
 
             # Step 1: deterministic candidate retrieval
             normalized = self._fuzzy.normalize_inputs(request)
