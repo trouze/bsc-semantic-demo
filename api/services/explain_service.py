@@ -26,6 +26,9 @@ class ExplainService:
         normalized_request: Optional[dict] = None,
         semantic_objects_used: Optional[List[str]] = None,
         semantic_backend: Optional[str] = None,
+        data_freshness: Optional[dict] = None,
+        model_health: Optional[dict] = None,
+        lineage: Optional[dict] = None,
     ) -> ExplainResponse:
         return ExplainResponse(
             trace_id=trace_id,
@@ -43,4 +46,7 @@ class ExplainService:
             normalized_request=normalized_request,
             semantic_objects_used=semantic_objects_used or [],
             semantic_backend=semantic_backend,
+            data_freshness=data_freshness,
+            model_health=model_health,
+            lineage=lineage,
         )

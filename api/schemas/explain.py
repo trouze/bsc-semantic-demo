@@ -20,3 +20,6 @@ class ExplainResponse(BaseModel):
     normalized_request: Optional[Dict[str, Any]] = None
     semantic_objects_used: List[str] = []   # dbt semantic layer objects referenced
     semantic_backend: Optional[str] = None  # 'dbt_mcp' or 'direct_sql'
+    data_freshness: Optional[Dict[str, Any]] = None   # source freshness info
+    model_health: Optional[Dict[str, Any]] = None      # dbt model test results
+    lineage: Optional[Dict[str, Any]] = None           # data lineage graph

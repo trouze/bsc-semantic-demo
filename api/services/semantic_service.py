@@ -40,7 +40,7 @@ from api.schemas.search import (
     TimingsMs,
 )
 from api.schemas.trace import TraceLog
-from api.services.cortex_service import CortexService, RerankResult
+from api.services.cortex_service import CortexService, RerankResult, format_semantic_context
 from api.services.dbt_mcp_service import DbtMcpService
 from api.services.explain_service import ExplainService
 from api.services.fuzzy_service import FuzzyService, NormalizedQuery
@@ -368,6 +368,10 @@ class SemanticService:
         candidates: List[CandidateSummary] = []
         semantic_objects_used: List[str] = []
         parse_prompt_used: Optional[str] = None
+        semantic_context_str: Optional[str] = None
+        data_freshness: Optional[Dict[str, Any]] = None
+        model_health: Optional[Dict[str, Any]] = None
+        lineage: Optional[Dict[str, Any]] = None
 
         try:
             # Step 0a: dbt MCP semantic context (if available)
@@ -378,6 +382,29 @@ class SemanticService:
                 except Exception as exc:
                     logger.warning(f"dbt_mcp_context_failed: {exc}")
 
+                # Fetch rich semantic context for prompt enrichment
+                try:
+                    sem_ctx = self._dbt_mcp.get_semantic_model_context()
+                    semantic_context_str = format_semantic_context(sem_ctx)
+                except Exception as exc:
+                    logger.warning(f"dbt_mcp_semantic_model_context_failed: {exc}")
+
+                # Fetch model health, freshness, and lineage for explain panel
+                try:
+                    model_health = self._dbt_mcp.get_model_health("fct_orders")
+                except Exception as exc:
+                    logger.warning(f"dbt_mcp_model_health_failed: {exc}")
+                try:
+                    sources = self._dbt_mcp.get_sources_freshness()
+                    if sources:
+                        data_freshness = {"sources": sources}
+                except Exception as exc:
+                    logger.warning(f"dbt_mcp_sources_freshness_failed: {exc}")
+                try:
+                    lineage = self._dbt_mcp.get_lineage("fct_orders")
+                except Exception as exc:
+                    logger.warning(f"dbt_mcp_lineage_failed: {exc}")
+
             # Step 0: parse free text if needed
             if request.mode == "free_text" and request.free_text:
                 if pre_parsed_intent:
@@ -385,7 +412,10 @@ class SemanticService:
                     parse_prompt_used = intent.raw_response
                 else:
                     with timer.segment("cortex_parse"):
-                        intent = self._cortex.parse_user_input(request.free_text)
+                        intent = self._cortex.parse_user_input(
+                            request.free_text,
+                            semantic_context=semantic_context_str,
+                        )
                         parse_prompt_used = intent.raw_response
 
                 f = request.fields
@@ -438,6 +468,7 @@ class SemanticService:
                         query=query_str,
                         candidates=rerank_pool,
                         top_n=request.top_n,
+                        semantic_context=semantic_context_str,
                     )
 
             # Step 3: final fetch
@@ -545,6 +576,9 @@ class SemanticService:
             normalized_request=vars(normalized) if normalized else None,
             semantic_objects_used=semantic_objects_used,
             semantic_backend=settings.semantic_backend,
+            data_freshness=data_freshness,
+            model_health=model_health,
+            lineage=lineage,
         )
         self._explain_store[trace_id] = explain_resp
 

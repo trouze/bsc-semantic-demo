@@ -62,7 +62,7 @@ First, determine the intent:
   - "metric_query": the user is asking an AGGREGATE or ANALYTICAL question about
     orders — counts, averages, trends, comparisons, totals, breakdowns by status/region/time.
     Keywords: how many, total, average, count, trend, breakdown, by status, by region.
-
+{semantic_context}
 Fields to extract:
   intent: "order_lookup" or "metric_query"
   order_id: string or null (e.g. "SO-2026-001234" or partial like "01234")
@@ -86,7 +86,7 @@ You are an order matching assistant for a medical device fulfillment company.
 A customer support rep is on a live call and needs the most relevant orders.
 
 User query: {query}
-
+{semantic_context}
 Candidate orders (JSON):
 {candidates_json}
 
@@ -154,6 +154,39 @@ User question: {question}
 Return JSON only."""
 
 
+def format_semantic_context(ctx: Dict[str, Any]) -> str:
+    """Format a semantic model context dict into a prompt-friendly string."""
+    lines: List[str] = []
+
+    if ctx.get("status_values"):
+        lines.append("Valid order status values: " + ", ".join(ctx["status_values"]))
+
+    if ctx.get("business_terms"):
+        lines.append("Business term definitions:")
+        for term, defn in ctx["business_terms"].items():
+            lines.append(f"  - {term}: {defn}")
+
+    if ctx.get("entity_relationships"):
+        lines.append("Entity relationships:")
+        for rel in ctx["entity_relationships"]:
+            lines.append(f"  - {rel}")
+
+    if ctx.get("dimensions"):
+        named = [d for d in ctx["dimensions"] if d.get("description")]
+        if named:
+            lines.append("Dimension descriptions:")
+            for d in named:
+                lines.append(f"  - {d['name']}: {d['description']}")
+
+    if ctx.get("metrics"):
+        lines.append("Available metrics:")
+        for m in ctx["metrics"]:
+            desc = m.get("description", "")
+            lines.append(f"  - {m['name']}: {desc}" if desc else f"  - {m['name']}")
+
+    return "\n".join(lines)
+
+
 def _cache_key(*parts: Any) -> str:
     raw = json.dumps(parts, default=str, sort_keys=True)
     return hashlib.sha256(raw.encode()).hexdigest()
@@ -176,14 +209,21 @@ class CortexService:
         text: str,
         available_metrics: Optional[List[Dict[str, Any]]] = None,
         available_dimensions: Optional[List[Dict[str, Any]]] = None,
+        semantic_context: Optional[str] = None,
     ) -> ParsedIntent:
         """Call Cortex to classify intent and extract fields.
 
         When metrics/dimensions are provided, the LLM also builds query_metrics
         params for metric_query intents in the same call (saving a round trip).
+
+        When semantic_context is provided, it is injected into the parse prompt
+        to give the LLM knowledge of the data model (valid statuses, business
+        terms, entity relationships, dimension descriptions).
         """
         from datetime import date
         today = date.today().isoformat()
+
+        ctx_block = f"\n{semantic_context}\n" if semantic_context else ""
 
         if available_metrics and available_dimensions:
             metric_names = ", ".join(m.get("name", "") for m in available_metrics)
@@ -195,7 +235,9 @@ class CortexService:
                 dim_names=dim_names,
             )
         else:
-            prompt = _PARSE_PROMPT_TEMPLATE.format(today=today, query=text)
+            prompt = _PARSE_PROMPT_TEMPLATE.format(
+                today=today, query=text, semantic_context=ctx_block,
+            )
 
         raw = self._complete(prompt, label="parse_user_input")
         intent = self._safe_parse_intent(raw)
@@ -207,8 +249,13 @@ class CortexService:
         query: str,
         candidates: List[CandidateSummary],
         top_n: int,
+        semantic_context: Optional[str] = None,
     ) -> RerankResult:
-        """Rerank candidates using Cortex. Results are cached by (query, candidate_ids)."""
+        """Rerank candidates using Cortex. Results are cached by (query, candidate_ids).
+
+        When semantic_context is provided, it is injected into the rerank prompt
+        to help Cortex reason about field meanings and status values.
+        """
         candidate_ids = [c.order_id for c in candidates]
         cache_key = _cache_key(query, candidate_ids, top_n)
 
@@ -234,10 +281,13 @@ class CortexService:
             indent=2,
         )
 
+        ctx_block = f"\n{semantic_context}\n" if semantic_context else ""
+
         prompt = _RERANK_PROMPT_TEMPLATE.format(
             query=query,
             candidates_json=candidates_json,
             top_n=top_n,
+            semantic_context=ctx_block,
         )
 
         t0 = time.perf_counter()
@@ -361,16 +411,22 @@ class CortexService:
                     data = repaired
                 else:
                     raise
+            def _clean(val):
+                """Treat string 'null'/'None' as actual None."""
+                if isinstance(val, str) and val.strip().lower() in ("null", "none", ""):
+                    return None
+                return val
+
             return ParsedIntent(
                 intent=data.get("intent", "order_lookup"),
-                order_id=data.get("order_id"),
-                purchase_order_id=data.get("purchase_order_id"),
-                customer_name=data.get("customer_name"),
-                facility_name=data.get("facility_name"),
-                date_start=data.get("date_start"),
-                date_end=data.get("date_end"),
-                contact_name=data.get("contact_name"),
-                metric_question=data.get("metric_question"),
+                order_id=_clean(data.get("order_id")),
+                purchase_order_id=_clean(data.get("purchase_order_id")),
+                customer_name=_clean(data.get("customer_name")),
+                facility_name=_clean(data.get("facility_name")),
+                date_start=_clean(data.get("date_start")),
+                date_end=_clean(data.get("date_end")),
+                contact_name=_clean(data.get("contact_name")),
+                metric_question=_clean(data.get("metric_question")),
                 metric_params=data.get("metric_params"),
             )
         except Exception as exc:

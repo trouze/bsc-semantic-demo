@@ -1,4 +1,4 @@
-"""Explain panel — SQL, rerank rationale, semantic objects, MetricFlow SQL."""
+"""Explain panel — SQL, rerank rationale, semantic objects, MetricFlow SQL, data health, lineage."""
 
 import json
 import streamlit as st
@@ -39,7 +39,7 @@ _TAB_HELP = {
 
 def _help_caption(key: str) -> None:
     """Render a help caption at the top of a tab."""
-    st.caption(f"ℹ️ {_TAB_HELP.get(key, '')}")
+    st.caption(f"\u2139\ufe0f {_TAB_HELP.get(key, '')}")
 
 
 def render_explain_panel(explain: Dict[str, Any]) -> None:
@@ -80,10 +80,12 @@ def _render_metric_explain(explain: Dict[str, Any], metric_result: Dict[str, Any
                 cols = st.columns(2)
                 with cols[0]:
                     used = metric_result.get("metrics_used", [])
-                    st.markdown(f"**Metrics:** {', '.join(f'`{m}`' for m in used) if used else '—'}")
+                    metrics_str = ", ".join(f"`{m}`" for m in used) if used else "\u2014"
+                    st.markdown(f"**Metrics:** {metrics_str}")
                 with cols[1]:
                     dims = metric_result.get("dimensions_used", [])
-                    st.markdown(f"**Dimensions:** {', '.join(f'`{d}`' for d in dims) if dims else '—'}")
+                    dims_str = ", ".join(f"`{d}`" for d in dims) if dims else "\u2014"
+                    st.markdown(f"**Dimensions:** {dims_str}")
         else:
             st.info("MetricFlow SQL not available for this query.")
 
@@ -94,7 +96,8 @@ def _render_metric_explain(explain: Dict[str, Any], metric_result: Dict[str, Any
             st.code(raw_sql, language="sql")
         else:
             st.info("This metric query was executed entirely through the dbt Semantic Layer.")
-        st.markdown(f"**Rows returned:** {explain.get('candidate_count', '—')}")
+        row_count = explain.get("candidate_count", "\u2014")
+        st.markdown(f"**Rows returned:** {row_count}")
 
     with tabs[2]:
         _help_caption("normalized_request")
@@ -114,15 +117,17 @@ def _render_order_explain(explain: Dict[str, Any]) -> None:
         "Rerank",
         "Final Fetch SQL",
         "Normalized Request",
+        "Data Health",
+        "Data Lineage",
     ])
+
+    qids = explain.get("snowflake_query_ids", {})
 
     with tabs[0]:
         _help_caption("candidate_sql_order")
-        st.markdown(
-            f"**Candidates retrieved:** {explain.get('candidate_count', '—')}"
-        )
+        cand_count = explain.get("candidate_count", "\u2014")
+        st.markdown(f"**Candidates retrieved:** {cand_count}")
         st.code(explain.get("candidate_sql", ""), language="sql")
-        qids = explain.get("snowflake_query_ids", {})
         if qids.get("candidate"):
             st.caption(f"Snowflake Query ID: `{qids['candidate']}`")
 
@@ -134,15 +139,17 @@ def _render_order_explain(explain: Dict[str, Any]) -> None:
             st.markdown("**Reranked order:**")
             for i, oid in enumerate(rerank_order, 1):
                 reason = rationale.get(oid, "")
-                st.markdown(f"{i}. `{oid}` — {reason}")
+                st.markdown(f"{i}. `{oid}` \u2014 {reason}")
         else:
             st.info("Reranking skipped (exact match or empty candidate set).")
 
         versions = explain.get("prompt_versions", {})
         if versions:
+            parse_ver = versions.get("parse", "\u2014")
+            rerank_ver = versions.get("rerank", "\u2014")
             st.caption(
-                f"Prompt versions — parse: `{versions.get('parse', '—')}` "
-                f"· rerank: `{versions.get('rerank', '—')}`"
+                f"Prompt versions \u2014 parse: `{parse_ver}` "
+                f"\u00b7 rerank: `{rerank_ver}`"
             )
 
         if explain.get("rerank_prompt_used"):
@@ -152,7 +159,6 @@ def _render_order_explain(explain: Dict[str, Any]) -> None:
     with tabs[2]:
         _help_caption("fetch_sql")
         st.code(explain.get("fetch_sql", ""), language="sql")
-        qids = explain.get("snowflake_query_ids", {})
         if qids.get("fetch_top"):
             st.caption(f"Snowflake Query ID: `{qids['fetch_top']}`")
 
@@ -166,6 +172,12 @@ def _render_order_explain(explain: Dict[str, Any]) -> None:
 
         _render_semantic_info(explain)
 
+    with tabs[4]:
+        _render_data_health_tab(explain)
+
+    with tabs[5]:
+        _render_lineage_tab(explain)
+
 
 def _render_semantic_info(explain: Dict[str, Any]) -> None:
     """Shared section showing semantic backend info."""
@@ -177,3 +189,106 @@ def _render_semantic_info(explain: Dict[str, Any]) -> None:
         st.markdown("**Semantic objects used:**")
         for obj in sem_objects:
             st.markdown(f"  - `{obj}`")
+
+
+def _render_data_health_tab(explain: Dict[str, Any]) -> None:
+    """Render model health and source freshness information."""
+    health = explain.get("model_health")
+    freshness = explain.get("data_freshness")
+
+    if not health and not freshness:
+        st.info("Data health information not available (dbt MCP not connected).")
+        return
+
+    if health:
+        st.markdown("**Model Health \u2014 fct_orders**")
+        if isinstance(health, dict):
+            status = health.get("status", health.get("state", "unknown"))
+            st.markdown(f"Status: `{status}`")
+
+            tests = health.get("tests", health.get("test_results", []))
+            if tests:
+                st.markdown("**Test Results:**")
+                if isinstance(tests, list):
+                    for t in tests:
+                        if isinstance(t, dict):
+                            name = t.get("name", t.get("test_name", "unnamed"))
+                            result = t.get("status", t.get("result", "unknown"))
+                            icon = "pass" if result.lower() in ("pass", "success") else "fail"
+                            st.markdown(f"  - {name}: `{icon}`")
+                        else:
+                            st.markdown(f"  - {t}")
+
+            # Show any extra keys as raw JSON
+            extra = {k: v for k, v in health.items()
+                     if k not in ("status", "state", "tests", "test_results")}
+            if extra:
+                with st.expander("Raw model health"):
+                    st.json(json.dumps(extra, default=str))
+        else:
+            st.json(json.dumps(health, default=str))
+
+    if freshness:
+        st.markdown("---")
+        st.markdown("**Source Freshness**")
+        sources = freshness.get("sources", freshness) if isinstance(freshness, dict) else freshness
+        if isinstance(sources, list):
+            for src in sources:
+                if isinstance(src, dict):
+                    name = src.get("name", src.get("source_name", "unknown"))
+                    loaded = src.get("loaded_at", src.get("max_loaded_at", ""))
+                    freshness_status = src.get("status", src.get("state", ""))
+                    line = f"  - **{name}**"
+                    if loaded:
+                        line += f": last loaded `{loaded}`"
+                    if freshness_status:
+                        line += f" ({freshness_status})"
+                    st.markdown(line)
+                else:
+                    st.markdown(f"  - {src}")
+        else:
+            st.json(json.dumps(sources, default=str))
+
+
+def _render_lineage_tab(explain: Dict[str, Any]) -> None:
+    """Render data lineage provenance."""
+    lineage = explain.get("lineage")
+
+    if not lineage:
+        st.info("Lineage information not available (dbt MCP not connected).")
+        return
+
+    st.markdown("**Data Lineage \u2014 fct_orders**")
+
+    # Try to extract a path from common lineage response shapes
+    if isinstance(lineage, dict):
+        # Look for parent/child relationships or node lists
+        parents = lineage.get("parents", lineage.get("upstream", []))
+        children = lineage.get("children", lineage.get("downstream", []))
+
+        if parents or children:
+            if parents:
+                st.markdown("**Upstream (sources):**")
+                if isinstance(parents, list):
+                    for p in parents:
+                        name = p.get("name", p) if isinstance(p, dict) else str(p)
+                        st.markdown(f"  - `{name}`")
+                else:
+                    st.markdown(f"  - `{parents}`")
+
+            st.markdown("**Current model:** `fct_orders` -> `order_search_v`")
+
+            if children:
+                st.markdown("**Downstream (consumers):**")
+                if isinstance(children, list):
+                    for c in children:
+                        name = c.get("name", c) if isinstance(c, dict) else str(c)
+                        st.markdown(f"  - `{name}`")
+                else:
+                    st.markdown(f"  - `{children}`")
+        else:
+            # Render whatever shape we got
+            with st.expander("Raw lineage data"):
+                st.json(json.dumps(lineage, default=str))
+    else:
+        st.json(json.dumps(lineage, default=str))

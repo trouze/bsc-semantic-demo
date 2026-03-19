@@ -319,6 +319,88 @@ class DbtMcpService:
             "object_count": len(metrics),
         }
 
+    def get_semantic_model_context(self) -> Dict[str, Any]:
+        """Fetch rich semantic context for prompt enrichment.
+
+        Returns dimension descriptions, entity relationships, metric
+        definitions, and hardcoded domain knowledge (valid status values,
+        business term mappings).  Result is cached via the underlying
+        list_metrics / get_dimensions / get_entities caches.
+        """
+        metrics = self.list_metrics()
+        metric_names = [m.get("name", "") for m in metrics]
+        sample = metric_names[:5] if metric_names else []
+
+        dims = self.get_dimensions(sample) if sample else []
+        entities = self.get_entities(sample) if sample else []
+
+        # --- business vocabulary (domain knowledge not in MCP) ---
+        status_values = [
+            "CREATED", "ALLOCATED", "PICKED", "SHIPPED",
+            "DELIVERED", "BACKORDERED", "CANCELLED", "ON_HOLD",
+        ]
+        business_terms = {
+            "is_fulfilled": "order has been SHIPPED or DELIVERED",
+            "priority_flag": "TRUE when the order is flagged as urgent / priority",
+            "fulfillment_rate": "percentage of orders that are shipped or delivered",
+            "priority_rate": "percentage of orders flagged as priority",
+            "days_to_last_update": "calendar days from order creation to most recent status change",
+        }
+        entity_relationships = [
+            "Each order belongs to exactly one customer (customer_account_id)",
+            "Each order ships to exactly one facility (facility_id)",
+            "Facilities have city, state, and zip attributes",
+        ]
+
+        return {
+            "status_values": status_values,
+            "business_terms": business_terms,
+            "entity_relationships": entity_relationships,
+            "dimensions": [
+                {"name": d.get("name", ""), "type": d.get("type", ""), "description": d.get("description", "")}
+                for d in dims
+            ],
+            "metrics": [
+                {"name": m.get("name", ""), "description": m.get("description", "")}
+                for m in metrics
+            ],
+            "entities": [
+                {"name": e.get("name", ""), "type": e.get("type", ""), "description": e.get("description", "")}
+                for e in entities
+            ],
+        }
+
+    def get_model_health(self, model_name: str) -> Optional[Dict[str, Any]]:
+        """Fetch model health / test status via MCP.  Returns None on failure."""
+        try:
+            raw = self._call("get_model_health", {"model_name": model_name})
+            return raw if isinstance(raw, dict) else {"raw": raw}
+        except Exception as exc:
+            logger.warning(f"get_model_health_failed: {exc}")
+            return None
+
+    def get_sources_freshness(self) -> Optional[List[Dict[str, Any]]]:
+        """Fetch source freshness info via MCP.  Returns None on failure."""
+        try:
+            raw = self._call("get_all_sources", {})
+            if isinstance(raw, list):
+                return raw
+            if isinstance(raw, dict):
+                return [raw]
+            return None
+        except Exception as exc:
+            logger.warning(f"get_sources_freshness_failed: {exc}")
+            return None
+
+    def get_lineage(self, model_name: str) -> Optional[Dict[str, Any]]:
+        """Fetch lineage graph for a model via MCP.  Returns None on failure."""
+        try:
+            raw = self._call("get_lineage", {"model_name": model_name})
+            return raw if isinstance(raw, dict) else {"raw": raw}
+        except Exception as exc:
+            logger.warning(f"get_lineage_failed: {exc}")
+            return None
+
     def list_semantic_objects(self, refresh: bool = False) -> List[SemanticObject]:
         objects: List[SemanticObject] = []
         for m in self.list_metrics(refresh=refresh):

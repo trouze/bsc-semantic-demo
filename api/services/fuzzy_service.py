@@ -62,6 +62,15 @@ _EXPANSIONS = {
     "gen": ["gen", "general"],
 }
 
+# Stop words — common English words that won't appear in searchable data fields
+_STOP_WORDS = frozenset({
+    "find", "show", "get", "give", "list", "display", "fetch", "pull",
+    "me", "my", "the", "for", "and", "with", "from", "about", "what",
+    "where", "when", "how", "any", "all", "need", "want", "can", "please",
+    "orders", "order", "shipped", "delivered", "recent", "latest", "last",
+    "look", "looking", "search", "check", "tell", "update", "info",
+})
+
 
 def _expand_tokens(tokens: List[str]) -> List[str]:
     expanded = []
@@ -177,15 +186,21 @@ class FuzzyService:
         if cust_like_parts:
             match_conditions.append(f"({' OR '.join(cust_like_parts)})")
 
-        # Free-text blob fallback tokens
+        # Free-text blob fallback tokens — filter stop words and use ALL
+        # remaining tokens as OR'd match conditions (not just the first).
+        blob_like_parts: List[str] = []
         for i, tok in enumerate(normalized.free_text_tokens[:8]):
             param_name = f"blob_tok_{i}"
             params[param_name] = f"%{tok}%"
             score_parts.append(
                 f"CASE WHEN search_blob LIKE %({param_name})s THEN 5 ELSE 0 END"
             )
-            if not match_conditions:
-                match_conditions.append(f"search_blob LIKE %({param_name})s")
+            # Only use data-bearing tokens (not stop words) in the WHERE clause
+            if tok not in _STOP_WORDS:
+                blob_like_parts.append(f"search_blob LIKE %({param_name})s")
+
+        if not match_conditions and blob_like_parts:
+            match_conditions.append(f"({' OR '.join(blob_like_parts)})")
 
         if match_conditions:
             where_clauses.append(f"({' OR '.join(match_conditions)})")
