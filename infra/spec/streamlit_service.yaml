@@ -1,0 +1,27 @@
+spec:
+  containers:
+    - name: agent
+      image: /demo_bsc/agent_repo/agent_app:latest
+      env:
+        DBT_SL_HOST: ${DBT_SL_HOST}
+        DBT_ENVIRONMENT_ID: ${DBT_ENVIRONMENT_ID}
+      secrets:
+        - snowflakeSecret: DEMO_BSC.DBT_CLOUD_TOKEN
+          envVarName: DBT_CLOUD_TOKEN
+      volumeMounts:
+        - name: catalog-cache
+          mountPath: /data
+      resources:
+        requests:
+          memory: 2Gi
+          cpu: "1"
+        limits:
+          memory: 4Gi
+  endpoints:
+    - name: streamlit
+      port: 8501
+      public: true
+  volumes:
+    - name: catalog-cache
+      source: block
+      size: 5Gi
