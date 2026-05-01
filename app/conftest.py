@@ -1,3 +1,4 @@
+"""pytest configuration — adds app/ to sys.path so `agent` is importable."""
 import sys
 import os
 
