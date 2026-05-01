@@ -1,0 +1,23 @@
+# Pinned for Python 3.11 + dbt-sl-sdk 0.6.1 compatibility
+
+# Web framework
+streamlit==1.32.2
+
+# Snowflake
+snowflake-snowpark-python==1.19.0
+snowflake-connector-python==3.9.0
+
+# dbt Semantic Layer SDK
+dbt-sl-sdk==0.6.1
+
+# Data
+# pyarrow 14 satisfies dbt-sl-sdk's pyarrow>=11,<15 constraint and is compatible with snowflake-snowpark-python 1.19.0
+pyarrow==14.0.2
+pandas==2.2.1
+
+# Validation
+pydantic==2.6.4
+
+# Utilities
+requests==2.31.0
+cachetools==5.3.3

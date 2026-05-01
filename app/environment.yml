@@ -1,0 +1,16 @@
+name: bsc-agent
+channels:
+  - snowflake
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - streamlit
+  - snowflake-snowpark-python
+  - pandas
+  - pyarrow
+  - pydantic
+  - requests
+  - cachetools
+  - pip:
+    - dbt-sl-sdk==0.6.1
