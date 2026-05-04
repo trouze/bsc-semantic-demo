@@ -1,283 +1,180 @@
-# Order Status Assistant
+# BSci Semantic Demo
 
-Customer-facing order lookup app for Boston Scientific medical device fulfillment.
-Answers live-call questions like *"Where is my order?"*, *"Do you have tracking?"*, *"It was placed last week to St. Mary's."*
+Natural-language analytics on Snowflake for Boston Scientific. Users ask questions in plain English — the app routes through a dbt Semantic Layer–powered agent, compiles SQL via the dbt SL SDK, executes it directly on Snowflake, and renders charts automatically.
 
-**Stack:** Streamlit · FastAPI · Snowflake · Snowflake Cortex · dbt Semantic Layer
+**Stack:** Streamlit · Snowflake Cortex · dbt Semantic Layer SDK · Snowpark Container Services (SPCS)
 
 ---
 
 ## Architecture
 
 ```
-┌───────────────┐        POST /search/orders        ┌─────────────────────┐
-│  Streamlit UI │ ────────────────────────────────► │   FastAPI API        │
-│  (port 8501)  │ ◄──────── SearchResponse ──────── │   (port 8000)        │
-└───────────────┘                                   └──────────┬──────────┘
-                                                               │
-                         ┌─────────────────────────────────────┤
-                         │          SemanticService            │
-                         │                                     │
-                         │  ┌─────────────┐ ┌──────────────┐  │
-                         │  │DbtMcpService│ │CortexService │  │
-                         │  │ (semantic   │ │ (rerank/parse)│  │
-                         │  │  context)   │ │              │  │
-                         │  └──────┬──────┘ └──────┬───────┘  │
-                         │         │                │          │
-                         │  ┌──────▼──────┐         │          │
-                         │  │FuzzyService │◄────────┘          │
-                         │  │ (SQL plan)  │                    │
-                         │  └──────┬──────┘                    │
-                         │         │                           │
-                         │  ┌──────▼──────────────────────────┐│
-                         │  │       SnowflakeService          ││
-                         │  │  DEMO_BSC.ORDER_SEARCH_V        ││
-                         │  │  DEMO_BSC.DEMO_TRACE_LOG        ││
-                         │  └─────────────────────────────────┘│
-                         └─────────────────────────────────────┘
-                                        │
-                         ┌──────────────▼──────────────┐
-                         │       dbt Project           │
-                         │  staging → marts → semantic │
-                         │  fct_orders · order_search_v│
-                         └─────────────────────────────┘
+User query (plain English)
+        │
+        ▼
+┌───────────────────────────────────────────────┐
+│  CortexAgent  (app/agents/cortex.py)          │
+│  SNOWFLAKE.CORTEX.COMPLETE → JSON query plan  │
+│  { skill, metrics[], group_by[], where[],     │
+│    order_by[], limit, confidence }            │
+└──────────────────┬────────────────────────────┘
+                   │
+                   ▼
+┌───────────────────────────────────────────────┐
+│  GuardrailsValidator  (app/guardrails/)        │
+│  • Metrics exist in catalog                   │
+│  • Dimensions valid for requested metric set  │
+│  • PII dimension block list                   │
+│  • Confidence ≥ 0.45 floor                    │
+│  • ≤ 5 metrics per query                      │
+└──────────────────┬────────────────────────────┘
+                   │
+                   ▼
+┌───────────────────────────────────────────────┐
+│  SkillRegistry → Skill  (app/skills/)          │
+│  5 built-in skills:                           │
+│    trend      time-series line chart          │
+│    compare    side-by-side bar chart          │
+│    breakdown  ranked bar / pie chart          │
+│    rank       sorted table with top-N filter  │
+│    summary    single-metric KPI card          │
+│  Skill.build_query() → QueryPlan              │
+└──────────────────┬────────────────────────────┘
+                   │
+                   ▼
+┌───────────────────────────────────────────────┐
+│  SLExecutor  (app/semantic/executor.py)        │
+│  AsyncSemanticLayerClient.compile_sql()       │
+│    → SQL string (dbt SL gRPC, no data yet)   │
+│  Snowflake connector.execute(sql)             │
+│    → DataFrame                               │
+└──────────────────┬────────────────────────────┘
+                   │
+                   ▼
+┌───────────────────────────────────────────────┐
+│  UI  (app/ui/)                                 │
+│  Plotly chart auto-selected by skill hint     │
+│  Query details expander (SQL, timing, conf.)  │
+│  👍 / 👎 rating buttons                       │
+└──────────────────┬────────────────────────────┘
+                   │
+                   ▼
+┌───────────────────────────────────────────────┐
+│  FeedbackCollector  (app/feedback/)            │
+│  Every interaction logged to Snowflake:       │
+│  INTERACTIONS · RATINGS · GOLDEN_SET          │
+│  Views: SKILL_PERFORMANCE · GOLDEN_CANDIDATES │
+└───────────────────────────────────────────────┘
 ```
 
-### 3-step pipeline per request
-1. **Deterministic SQL** — `FuzzyService` builds a parameterized LIKE query, Snowflake returns ≤ 200 candidates.
-2. **Cortex Reranking** — `CortexService` calls `SNOWFLAKE.CORTEX.COMPLETE` with a compact JSON candidate list and the user query; returns ranked IDs + rationale.
-3. **Final Fetch** — `SnowflakeService` fetches full `OrderStatusPayload` for top N IDs.
+**Key design decisions:**
+- `compile_sql()` over `query()` — dbt SL compiles the SQL but Snowflake executes it directly (speed + observability)
+- Streamlit is sync; dbt SL SDK is async-only → `ThreadPoolExecutor` with an isolated `asyncio` event loop per thread
+- Every query routes through a named, bounded skill — no free-form SQL generation
+- Feedback errors are silently swallowed and never break the main query flow
+
+---
+
+## Semantic Catalog
+
+`SemanticCatalog` eagerly loads all metrics and dimensions from the dbt Semantic Layer at startup (`lazy=False`). The LLM only ever sees catalog-registered names — the raw Snowflake schema is never exposed.
+
+Real BSci catalog: **13 metrics · 62 dimensions** across inventory, DIOH, and supply chain domains.
 
 ---
 
 ## Quick Start
 
-### 1. Prerequisites
-- Python 3.11+
-- Snowflake account with Cortex enabled
-- `.env` file (copy from `.env.example`)
-- (Optional) dbt-core + dbt-snowflake for the semantic layer
+### Prerequisites
 
-### 2. One-command setup
+- [Snowflake CLI v2+](https://docs.snowflake.com/developer-guide/snowflake-cli/installation) with a configured connection
+- [Docker Desktop](https://docs.docker.com/get-docker/)
+- [uv](https://docs.astral.sh/uv/getting-started/installation/)
+- A dbt Semantic Layer service token (from dbt Cloud)
+
+### Local development
 
 ```bash
-cp .env.example .env  # fill in Snowflake credentials
-./scripts/setup.sh
+# Install dependencies
+uv sync
+
+# Copy and fill in credentials
+cp .streamlit/secrets.toml.example .streamlit/secrets.toml
+# edit .streamlit/secrets.toml
+
+# Bootstrap feedback tables (run once)
+snow sql -f app/feedback/schema.sql --connection <your-connection>
+
+# Run the app
+uv run streamlit run app/streamlit_app.py
 ```
 
-This will install dependencies, generate 100k synthetic orders, load them into Snowflake, and (if dbt is installed) run `dbt build`.
+Open **http://localhost:8501**.
 
-Flags: `--skip-data`, `--skip-dbt`, `--dry-run`.
-
-### 3. Manual setup (alternative)
+### Deploy to Snowflake (SPCS)
 
 ```bash
-# DDL
-snowsql -f infra/sql/create_schema.sql
-snowsql -f infra/sql/create_tables.sql
-snowsql -f infra/sql/create_views.sql
-snowsql -f infra/sql/trace_log_tables.sql
+export SNOW_CONNECTION="my_connection"
+export DBT_SL_ENVIRONMENT_ID="335860"
+export DBT_SL_AUTH_TOKEN="dbtu_..."
 
-# Synthetic data
-cd infra/scripts && pip install -r requirements.txt
-python generate_and_load.py --orders 100000
-
-# dbt (optional, requires dbt-core + dbt-snowflake)
-cd dbt && dbt deps --profiles-dir . && dbt build --profiles-dir .
+chmod +x scripts/deploy.sh
+./scripts/deploy.sh
 ```
 
-### 4. Run locally
+The script handles everything: Snowflake object creation, Docker build + push, SPCS service deployment, and feedback table bootstrap. It prints the public HTTPS endpoint when the service becomes active (~5 min first cold start).
 
 ```bash
-# Terminal 1 — API
-pip install -r api/requirements.txt
-uvicorn api.main:app --reload
+# Re-deploy after code changes (rebuild image + upgrade service)
+./scripts/deploy.sh --upgrade
 
-# Terminal 2 — UI
-cd ui && pip install -r requirements.txt
-streamlit run app.py
-```
-
-Open **http://localhost:8501** for the UI, **http://localhost:8000/docs** for the API.
-
-### 5. Docker Compose
-
-```bash
-docker compose up --build
+# Tear down all created resources
+./scripts/deploy.sh --teardown
 ```
 
 ---
 
-## dbt Semantic Layer
+## Configuration
 
-The `dbt/` directory contains a full dbt project that models the synthetic data:
+All settings are read from `.streamlit/secrets.toml` (local) or environment variables (SPCS). See `.streamlit/secrets.toml.example` for a full template.
 
-```
-dbt/
-  dbt_project.yml
-  profiles.yml
-  packages.yml
-  macros/
-    normalize_text.sql      # Snowflake-compatible text normalization
-    search_blob.sql         # Concatenated search field builder
-  models/
-    staging/                # Raw → cleaned (views)
-      stg_customers.sql
-      stg_facilities.sql
-      stg_orders.sql
-      stg_order_items.sql
-      stg_products.sql
-      stg_contacts.sql
-    marts/orders/           # Canonical entities (tables)
-      fct_orders.sql        # Denormalized order fact
-      order_search_v.sql    # Search-optimized view (replaces SQL-only ORDER_SEARCH_V)
-    semantic_models/        # MetricFlow semantic definitions
-      sem_orders.yml        # Metrics: order_volume, revenue, fulfillment_rate, etc.
-      sem_order_items.yml   # Metrics: line_item_count, units_ordered, etc.
-```
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `DBT_SL_ENVIRONMENT_ID` | Yes | — | dbt Cloud environment ID |
+| `DBT_SL_AUTH_TOKEN` | Yes | — | dbt Cloud service token |
+| `DBT_SL_HOST` | Yes | — | Semantic Layer gRPC host |
+| `SNOWFLAKE_ACCOUNT` | Yes* | — | Snowflake account identifier |
+| `SNOWFLAKE_USER` | Yes* | — | Snowflake username |
+| `SNOWFLAKE_PASSWORD` | Yes* | — | Snowflake password |
+| `SNOWFLAKE_WAREHOUSE` | No | `COMPUTE_WH` | Query warehouse |
+| `SNOWFLAKE_DATABASE` | No | `ANALYTICS` | Default database |
+| `SNOWFLAKE_SCHEMA` | No | `PUBLIC` | Default schema |
+| `SNOWFLAKE_ROLE` | No | — | Snowflake role override |
+| `SNOWFLAKE_FEEDBACK_DB` | No | `ANALYTICS` | Feedback tables database |
+| `SNOWFLAKE_FEEDBACK_SCHEMA` | No | `SEMANTIC_DEMO_FEEDBACK` | Feedback tables schema |
+| `CORTEX_MODEL` | No | `claude-3-5-sonnet` | Cortex LLM model name |
+| `MAX_RESULT_ROWS` | No | `10000` | Max rows returned per query |
 
-### Semantic objects defined
-
-| Type | Name | Description |
-|------|------|-------------|
-| Metric | `order_volume` | Total number of orders |
-| Metric | `revenue` | Total order revenue USD |
-| Metric | `average_order_value` | Avg order value USD |
-| Metric | `fulfillment_rate` | % shipped/delivered |
-| Metric | `priority_rate` | % priority-flagged |
-| Dimension | `status` | Order fulfillment status |
-| Dimension | `customer_name` | Customer account name |
-| Dimension | `facility_name` | Shipping facility name |
-| Dimension | `sales_region` | Geographic sales region |
-| Entity | `order` | Primary: order_id |
-| Entity | `customer` | Foreign: customer_account_id |
-| Entity | `facility` | Foreign: facility_id |
-
-### dbt MCP integration
-
-The API supports a `SEMANTIC_BACKEND` setting (`dbt_mcp` or `direct_sql`):
-
-- **`dbt_mcp`** (default): On startup, the `DbtMcpService` checks for a running dbt MCP server. If available, it enumerates semantic objects and uses them for governed context in explainability panels. If unavailable, falls back gracefully to `direct_sql`.
-- **`direct_sql`**: Uses the SQL views directly without MCP.
-
-The dbt MCP server must be configured separately in Cursor settings. The `DbtMcpService` logs all semantic object references per request for full traceability.
+*Not required when running inside SPCS — Snowflake credentials come from the active session via `get_active_session()`.
 
 ---
 
-## API Reference
+## Feedback & Eval
 
-| Method | Path | Description |
-|--------|------|-------------|
-| `POST` | `/search/orders` | Main order lookup — structured or free-text |
-| `GET`  | `/orders/{order_id}` | Direct single-order status fetch |
-| `GET`  | `/explain/{trace_id}` | Full explainability artifact for a request |
-| `GET`  | `/health` | Snowflake connectivity check |
+Every interaction is automatically logged to Snowflake. Users rate responses with 👍 / 👎. High-rated successful interactions surface in `GOLDEN_CANDIDATES` as eval set candidates.
 
-### SearchRequest (POST /search/orders)
+```sql
+-- Skill-level success rates and avg confidence
+SELECT * FROM ANALYTICS.SEMANTIC_DEMO_FEEDBACK.SKILL_PERFORMANCE;
 
-```json
-{
-  "mode": "free_text",
-  "free_text": "St Mary's order from last Tuesday — can you find it?",
-  "fields": {},
-  "top_n": 5
-}
+-- All interactions with explicit ratings joined
+SELECT * FROM ANALYTICS.SEMANTIC_DEMO_FEEDBACK.RATED_INTERACTIONS;
+
+-- Promote to golden set for regression evals
+SELECT * FROM ANALYTICS.SEMANTIC_DEMO_FEEDBACK.GOLDEN_CANDIDATES;
 ```
 
-Or structured:
-
-```json
-{
-  "mode": "structured",
-  "fields": {
-    "facility_name": "Cleveland Clinic",
-    "date_start": "2026-03-01",
-    "date_end": "2026-03-15"
-  },
-  "top_n": 5
-}
-```
-
-### SearchResponse
-
-```json
-{
-  "trace_id": "abc123",
-  "results": [
-    {
-      "order_id": "SO-2026-000123",
-      "purchase_order_id": "PO-00012-884192",
-      "status": "SHIPPED",
-      "status_last_updated_ts": "2026-03-10T14:22:00Z",
-      "customer_name": "St. Mary's Hospital",
-      "facility_name": "St Marys Hosp - Boston",
-      "promised_delivery_date": "2026-03-12",
-      "carrier": "UPS",
-      "tracking_number": "1Z...",
-      "match_score": 0.92,
-      "match_reasons": ["facility token match", "date window match"]
-    }
-  ],
-  "timings_ms": {
-    "sql_candidate_ms": 480,
-    "cortex_rerank_ms": 950,
-    "sql_fetch_top_ms": 120,
-    "total_ms": 1700
-  },
-  "candidate_count": 47,
-  "candidate_sql": "...",
-  "fetch_sql": "..."
-}
-```
-
-### ExplainResponse (GET /explain/{trace_id})
-
-Returns: candidate SQL, candidate count, pre-rerank candidates, rerank rationale, fetch SQL, timings, prompt versions, Snowflake query IDs, semantic objects used, and semantic backend identifier.
-
----
-
-## Evaluation Harness
-
-```bash
-pip install httpx
-python evaluation/run_eval.py --api-url http://localhost:8000 --output results.json
-python evaluation/report.py results.json
-```
-
-Outputs accuracy@5, p50, p95 latency, and a per-prompt diff report.
-
-15 golden prompts cover exact ID lookups, fuzzy facility matching, date window queries, PO lookups, and status-filtered searches.
-
----
-
-## Observability
-
-Every request produces a trace record in `DEMO_BSC.DEMO_TRACE_LOG`:
-
-| Column | Description |
-|--------|-------------|
-| `trace_id` | UUID per request |
-| `snowflake_qid_candidate` | Snowflake query ID for candidate retrieval |
-| `snowflake_qid_fetch` | Snowflake query ID for final fetch |
-| `sql_candidate_ms` | Candidate query latency |
-| `cortex_rerank_ms` | Cortex rerank latency |
-| `sql_fetch_top_ms` | Final fetch latency |
-| `total_ms` | End-to-end latency |
-| `parse_prompt_version` | Version of the parse prompt template |
-| `rerank_prompt_version` | Version of the rerank prompt template |
-
-`DEMO_TRACE_SUMMARY_V` provides hourly p50/p95 latency rollups for the last 7 days.
-
----
-
-## Security Model (demo)
-
-- Snowflake service account is **read-only** on `DEMO_BSC.*`
-- All queries are **parameterized templates** — no user SQL accepted
-- Schema **allowlist** enforced in `SnowflakeService` (validates both 2-part and 3-part references)
-- DML/DDL blocked: DROP, DELETE, INSERT, UPDATE, TRUNCATE, ALTER, CREATE
-- Row limits and query timeouts enforced per request
-- Trace log writes bypass the safety check via direct connection (INSERT-only to `DEMO_TRACE_LOG`)
+`EvalRunner` (`app/feedback/evaluator.py`) scores golden cases on skill match, metrics match, and SQL fragment presence. Wire it into CI to gate deploys on `pass_rate ≥ 0.85`.
 
 ---
 
@@ -285,71 +182,42 @@ Every request produces a trace record in `DEMO_BSC.DEMO_TRACE_LOG`:
 
 ```
 bsc-semantic-demo/
-  README.md
-  docker-compose.yml
-  .env.example
-  scripts/setup.sh              # One-command setup
+  pyproject.toml              # uv project definition
+  Dockerfile                  # SPCS-ready, linux/amd64, uv-based install
+  scripts/
+    deploy.sh                 # Full Snowflake deployment (infra + image + service + feedback DDL)
 
-  api/
-    main.py                     # FastAPI app
-    core/                       # config, logging, timing, errors
-    services/
-      semantic_service.py       # Orchestration — stable contract
-      fuzzy_service.py          # Deterministic SQL candidate builder
-      cortex_service.py         # Cortex parse + rerank
-      snowflake_service.py      # Parameterized, allowlisted Snowflake access
-      dbt_mcp_service.py        # dbt Semantic Layer MCP adapter
-      explain_service.py        # Explainability packaging
-    schemas/                    # Pydantic models (domain, search, explain, trace)
-    routers/                    # FastAPI route handlers + DI
+  app/
+    streamlit_app.py          # Entry point — session state, chat loop, cached catalog
+    config.py                 # Settings — reads st.secrets then env vars
+    async_utils.py            # ThreadPoolExecutor bridge (Streamlit sync ↔ async SDK)
 
-  ui/
-    app.py                      # Streamlit entrypoint
-    components/                 # search_form, results_table, sql_panel, trace_panel
+    agents/
+      cortex.py               # CortexAgent — CORTEX.COMPLETE → JSON query plan
+      orchestrator.py         # Orchestrator.process() — plan → guardrails → skill → execute
 
-  dbt/
-    dbt_project.yml
-    profiles.yml
-    packages.yml
-    macros/                     # normalize_text, search_blob
-    models/
-      staging/                  # stg_customers, stg_facilities, stg_orders, etc.
-      marts/orders/             # fct_orders, order_search_v
-      semantic_models/          # sem_orders.yml, sem_order_items.yml
+    semantic/
+      catalog.py              # SemanticCatalog — eager load, keyword search, LLM format method
+      executor.py             # SLExecutor — compile_sql() then Snowflake execute
 
-  infra/
-    sql/                        # create_schema, create_tables, create_views, trace_log
-    scripts/generate_and_load.py
-    dataset/README_DATASET.md
+    skills/
+      base.py                 # Skill ABC + ChartHint enum
+      builtin.py              # TrendSkill, CompareSkill, BreakdownSkill, RankSkill, SummarySkill
+      registry.py             # SkillRegistry
 
-  evaluation/
-    datasets/golden_prompts.jsonl
-    datasets/expected_results.jsonl
-    run_eval.py
-    report.py
+    guardrails/
+      validator.py            # GuardrailsValidator — whitelist, PII block, confidence floor
+
+    feedback/
+      schema.sql              # DDL — INTERACTIONS, RATINGS, GOLDEN_SET tables + analytical views
+      collector.py            # FeedbackCollector — log_interaction, log_rating
+      evaluator.py            # EvalRunner — golden set scoring
+
+    ui/
+      chat.py                 # render_message, render_feedback_buttons
+      results.py              # render_result — Plotly chart auto-selected by skill hint
+      sidebar.py              # Catalog panel + skill guide
+
+  .streamlit/
+    secrets.toml.example      # Credential template (copy to secrets.toml, never commit)
 ```
-
----
-
-## Performance SLO
-
-| Metric | Target | Notes |
-|--------|--------|-------|
-| p95 end-to-end | ≤ 5,000 ms | Full pipeline |
-| Candidate SQL | ≤ 500–1,000 ms | Date filter + LIKE on norm columns |
-| Cortex Rerank | ≤ 2,000 ms | ≤ 200 candidates, compact payload |
-| Final fetch | ≤ 200 ms | Top 5 order_ids by PK |
-
-Rerank results are cached for 10 minutes (TTL configurable) — identical queries on live calls return instantly.
-
----
-
-## Extending for Future Clients
-
-`SemanticService` is the stable contract. To add Agentforce or Tableau Next:
-
-1. Add a new FastAPI router (or a separate service) that calls `SemanticService.search_orders(request)`.
-2. Translate the client's query format into a `SearchRequest`.
-3. No changes to core logic, SQL, or Cortex prompts required.
-
-The `DbtMcpService` provides governed semantic context that future clients can leverage for metric-aware queries.
