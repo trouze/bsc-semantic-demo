@@ -30,3 +30,4 @@ dbt/.user.yml
 
 # Eval outputs
 evaluation/results.json
+.claude/
